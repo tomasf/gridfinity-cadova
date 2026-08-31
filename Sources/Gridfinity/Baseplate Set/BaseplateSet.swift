@@ -57,9 +57,9 @@ public struct BaseplateSet: Geometry3D {
             let mainPartCountX = xUnits / mainPartXUnits
             let mainPartCountY = yUnits / mainPartYUnits
 
-            let sparePartUnitsX = xUnits % maxBedUnitsX
-            let sparePartUnitsY = yUnits % maxBedUnitsY
 
+            let sparePartUnitsX = (xUnits - mainPartXUnits) % maxBedUnitsX
+            let sparePartUnitsY = (yUnits - mainPartYUnits) % maxBedUnitsY
             let sidePadding = (footprint.x - (Double(xUnits) * Units2D.size.x)) / 2
             let backPadding = (footprint.y - Double(yUnits) * Units2D.size.y) - frontPadding
 
