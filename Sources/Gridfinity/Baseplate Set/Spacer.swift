@@ -75,6 +75,9 @@ struct Spacer: Geometry3D {
                             .repeated(along: .x, step: Units2D.size.x, count: unitCount)
                             .translated(x: offset, y: size.y)
                     }
+
+                @unknown default:
+                    preconditionFailure("Unsupported interlocking side")
                 }
             }
     }
@@ -90,6 +93,7 @@ extension Rectangle.Side {
         switch axis {
         case .x: .alongY(xSide: axisDirection, zSide: .min)
         case .y: .alongX(ySide: axisDirection, zSide: .min)
+        @unknown default: preconditionFailure("Unsupported axis")
         }
     }
 }
