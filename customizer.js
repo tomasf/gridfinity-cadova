@@ -4,6 +4,10 @@ import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
 import { toCreasedNormals } from "three/addons/utils/BufferGeometryUtils.js";
 import { ModelBuilder, CancelledError } from "./builder.js";
 import { read3MF } from "./threemf.js";
+import { ViewportGrid } from "./grid.js";
+import { OriginAxes, AxisIndicator } from "./axes.js";
+import { frameIsometric } from "./camera.js";
+import { ViewportRenderer } from "./rendering.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -488,12 +492,14 @@ try {
 function createViewer() {
     THREE.Object3D.DEFAULT_UP.set(0, 0, 1);
     const container = $("viewer");
-    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    const renderer = new THREE.WebGLRenderer({ alpha: true });
     renderer.setPixelRatio(window.devicePixelRatio);
+    const viewportRenderer = new ViewportRenderer(renderer);
     container.append(renderer.domElement);
 
     const scene = new THREE.Scene();
-    const camera = new THREE.PerspectiveCamera(35, 1, 0.1, 10000);
+    scene.background = new THREE.Color(getComputedStyle(document.documentElement).getPropertyValue("--viewer").trim());
+    const camera = new THREE.PerspectiveCamera(30, 1, 0.1, 10000);
     const controlsView = new OrbitControls(camera, renderer.domElement);
     controlsView.enableDamping = true;
 
@@ -509,29 +515,33 @@ function createViewer() {
     camera.add(keyLight);
     scene.add(camera);
 
-    const gridColor = getComputedStyle(document.documentElement).getPropertyValue("--text").trim();
-    const grid = new THREE.GridHelper(400, 40, gridColor, gridColor);
-    grid.rotation.x = Math.PI / 2;
-    grid.material.transparent = true;
-    grid.material.opacity = 0.08;
+    const root = document.documentElement;
+    const gridColor = getComputedStyle(root).getPropertyValue("--grid").trim();
+    const grid = new ViewportGrid(gridColor);
     scene.add(grid);
+    const origin = new OriginAxes();
+    scene.add(origin);
+    const axisIndicator = new AxisIndicator(container);
+
+    function updateGridColor() {
+        grid.material.uniforms.color.value.set(getComputedStyle(root).getPropertyValue("--grid").trim());
+        scene.background.set(getComputedStyle(root).getPropertyValue("--viewer").trim());
+    }
+    // CSS updates the page automatically; the shader's color needs the same changes explicitly.
+    matchMedia("(prefers-color-scheme: dark)").addEventListener("change", updateGridColor);
+    new MutationObserver(updateGridColor).observe(root, {
+        attributes: true, attributeFilter: ["data-theme", "style", "class"],
+    });
 
     let current = null, framed = false;
 
-    function frame() {
-        const box = new THREE.Box3().setFromObject(current);
-        const size = box.getSize(new THREE.Vector3()).length();
-        const center = box.getCenter(new THREE.Vector3());
-        controlsView.target.copy(center);
-        camera.position.copy(center).add(new THREE.Vector3(0.6, -1.0, 0.75).normalize().multiplyScalar(size * 1.5));
-        camera.near = size / 100;
-        camera.far = size * 100;
-        camera.updateProjectionMatrix();
+    function frame(box) {
+        frameIsometric(camera, box, controlsView.target);
     }
 
     function resize() {
         const { clientWidth: width, clientHeight: height } = container;
-        renderer.setSize(width, height, false);
+        viewportRenderer.setSize(width, height);
         camera.aspect = width / height;
         camera.updateProjectionMatrix();
     }
@@ -540,7 +550,10 @@ function createViewer() {
 
     renderer.setAnimationLoop(() => {
         controlsView.update();
-        renderer.render(scene, camera);
+        camera.updateMatrixWorld();
+        grid.updateScale(camera, container.clientWidth, container.clientHeight);
+        axisIndicator.update(camera);
+        viewportRenderer.render(scene, camera);
     });
 
     // Frames the model the first time, and again when a different model is shown
@@ -561,7 +574,11 @@ function createViewer() {
         }
         current = object;
         scene.add(object);
+        const box = new THREE.Box3().setFromObject(object);
+        grid.updateBounds(box);
+        origin.visible = !box.isEmpty();
+        axisIndicator.show();
         $("overlay").hidden = true;
-        if (!framed || isNewModel) { frame(); framed = true; }
+        if (!framed || isNewModel) { frame(box); framed = true; }
     };
 }
