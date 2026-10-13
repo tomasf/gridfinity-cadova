@@ -35,9 +35,15 @@ export class ModelBuilder {
 
     async build(model, parameters) {
         await this.load();
-        const result = await this.request({ type: "build", model, parameters });
-        if (result.exitCode !== 0) this.cancel();
-        return result;
+        // A failed build keeps the worker: its model session replaces an instance that crashed or
+        // exited by itself, and one that only reported a failure keeps its cache for the next build.
+        return this.request({ type: "build", model, parameters });
+    }
+
+    // Builds the model file to download, for parameters the model has just built its preview with
+    async export(model, parameters) {
+        await this.load();
+        return this.request({ type: "export", model, parameters });
     }
 
     cancel() {
@@ -65,9 +71,10 @@ export class ModelBuilder {
             // leave the page busy indefinitely; the visitor can cancel sooner or retry afterward.
             const timer = setTimeout(() => {
                 if (this.pending?.id !== id) return;
-                this.fail(new Error(message.type === "build"
-                    ? "Build stopped after 2 minutes. Try simpler settings or retry."
-                    : "Loading the model took longer than 2 minutes. Please retry."));
+                this.fail(new Error({
+                    build: "Build stopped after 2 minutes. Try simpler settings or retry.",
+                    export: "Preparing the download stopped after 2 minutes. Please retry.",
+                }[message.type] ?? "Loading the model took longer than 2 minutes. Please retry."));
             }, 120_000);
             this.pending = { id, timer, resolve, reject };
             try {
@@ -91,6 +98,11 @@ export class ModelBuilder {
             if (this.worker === worker) this.fail(new Error("Couldn't read the model worker's response. Please retry."));
         };
         worker.onmessage = ({ data }) => {
+            // Reported after a request has finished, so it doesn't belong to one
+            if (data.type === "memory") {
+                if (this.worker === worker) this.onProgress(data);
+                return;
+            }
             // Messages already queued when a worker was stopped must not finish a newer request.
             if (this.worker !== worker || data.id !== this.pending?.id) return;
             switch (data.type) {

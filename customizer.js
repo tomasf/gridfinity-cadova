@@ -1,19 +1,21 @@
 import * as THREE from "three";
-import { OrbitControls } from "three/addons/controls/OrbitControls.js";
-import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
+import { ViewportControls } from "./navigation.js";
 import { toCreasedNormals } from "three/addons/utils/BufferGeometryUtils.js";
 import { ModelBuilder, CancelledError } from "./builder.js";
 import { read3MF } from "./threemf.js";
+import { readPreview } from "./preview.js";
 import { ViewportGrid } from "./grid.js";
 import { OriginAxes, AxisIndicator } from "./axes.js";
 import { frameIsometric } from "./camera.js";
 import { ViewportRenderer } from "./rendering.js";
+import { setupLighting } from "./lighting.js";
 
 const $ = (id) => document.getElementById(id);
 
 // The models and their parameters come from the model itself, listed once it has loaded. A
-// parameter is identified by its label within its model, and each model keeps its own values. Only
-// changed values are kept, by model; everything else has its default.
+// parameter is identified by an opaque key, which only has to agree with the model built along with
+// this page, and each model keeps its own values. Only changed values are kept, by model; everything
+// else has its default. Values aren't kept in the address, since a link would outlive the keys.
 let catalog, models, model;
 const changed = new Map();
 
@@ -38,10 +40,14 @@ function setUp(listing) {
 
     const hash = new URLSearchParams(location.hash.slice(1));
     model = models.find((m) => m.name === hash.get("model")) ?? models[0];
-    Object.assign(changedValues(model), valuesFromHash(hash, model));
+    writeHash(); // anything else in the address, such as values from an older link, doesn't apply
 
     const single = models.length === 1;
-    const title = single ? models[0].title ?? humanize(models[0].name.split("/").pop()) : catalog.title ?? "Customizer";
+    // Without a title from metadata, the page is named after the model, or for several, the product
+    const product = document.querySelector('meta[name="cadova-product"]')?.content;
+    const title = single
+        ? models[0].title ?? humanize(models[0].name.split("/").pop())
+        : catalog.title ?? (product ? humanize(product) : "Customizer");
     document.title = `${title} customizer`;
     $("title").textContent = title;
     const description = single ? models[0].description : catalog.description;
@@ -90,17 +96,16 @@ function select(next) {
             failed(error);
         }
     } else {
-        lastFile = null;
+        downloadable = null;
         $("download").disabled = true;
         requestBuild();
     }
 }
 
 // The value a parameter of a model gets: a changed value made to fit it (clamped to its range, or its
-// default if it's not a value this parameter can take, as can happen with a hand-edited address), or
-// else its default
+// default if it's not a value this parameter can take), or else its default
 function valueFor(parameter, m = model) {
-    const value = changed.get(m.name)?.[parameter.label];
+    const value = changed.get(m.name)?.[parameter.key];
     if (value === undefined) return parameter.default;
     switch (parameter.type) {
         case "boolean":
@@ -122,7 +127,7 @@ function valueFor(parameter, m = model) {
 }
 
 function valuesFor(m) {
-    return Object.fromEntries(m.parameters.map((parameter) => [parameter.label, valueFor(parameter, m)]));
+    return Object.fromEntries(m.parameters.map((parameter) => [parameter.key, valueFor(parameter, m)]));
 }
 
 function buildKey(m) {
@@ -157,7 +162,7 @@ function field(parameter, index) {
             const toggle = document.createElement("label");
             toggle.className = "toggle";
             const input = Object.assign(document.createElement("input"), { type: "checkbox", id });
-            input.addEventListener("change", () => update(parameter.label, input.checked));
+            input.addEventListener("change", () => update(parameter.key, input.checked));
             toggle.append(input, document.createElement("span"));
             head.append(toggle);
             element.removeChild(control);
@@ -176,7 +181,7 @@ function field(parameter, index) {
                     const button = Object.assign(document.createElement("button"), {
                         type: "button", textContent: humanize(option),
                     });
-                    button.addEventListener("click", () => { setValue(option); update(parameter.label, option); });
+                    button.addEventListener("click", () => { setValue(option); update(parameter.key, option); });
                     group.append(button);
                     return [option, button];
                 });
@@ -187,7 +192,7 @@ function field(parameter, index) {
             } else {
                 const select = Object.assign(document.createElement("select"), { id });
                 for (const option of parameter.options) select.append(new Option(humanize(option), option));
-                select.addEventListener("change", () => update(parameter.label, select.value));
+                select.addEventListener("change", () => update(parameter.key, select.value));
                 control.append(select);
                 setValue = (value) => { select.value = value; };
             }
@@ -208,7 +213,7 @@ function field(parameter, index) {
                 range.setAttribute("aria-label", parameter.label);
                 range.addEventListener("input", () => {
                     number.value = range.value;
-                    update(parameter.label, Number(range.value));
+                    update(parameter.key, Number(range.value));
                 });
                 control.append(range);
             }
@@ -218,7 +223,7 @@ function field(parameter, index) {
                     return;
                 }
                 if (range) range.value = number.value;
-                update(parameter.label, Number(number.value));
+                update(parameter.key, Number(number.value));
             });
             control.append(number);
             if (parameter.type === "angle") {
@@ -229,63 +234,34 @@ function field(parameter, index) {
         }
         default: {
             const input = Object.assign(document.createElement("input"), { type: "text", id });
-            input.addEventListener("change", () => update(parameter.label, input.value));
+            input.addEventListener("change", () => update(parameter.key, input.value));
             control.append(input);
             setValue = (value) => { input.value = value; };
         }
     }
     setValue(valueFor(parameter));
-    controls.set(parameter.label, setValue);
+    controls.set(parameter.key, setValue);
     return element;
 }
 
-function update(label, value) {
-    changedValues(model)[label] = value;
+function update(key, value) {
+    changedValues(model)[key] = value;
     requestBuild();
-    writeHash();
 }
 
 $("reset").addEventListener("click", () => {
     changed.delete(model.name);
-    for (const parameter of model.parameters) controls.get(parameter.label)(parameter.default);
-    writeHash();
+    for (const parameter of model.parameters) controls.get(parameter.key)(parameter.default);
     requestBuild();
 });
 
-// The model on screen and its changed values are kept in the address, so a configured model can be
-// shared
-function valuesFromHash(hash, m) {
-    const result = {};
-    for (const [label, raw] of hash) {
-        if (label === "model" && models.length > 1) continue;
-        const parameter = m.parameters.find((p) => p.label === label);
-        if (!parameter) continue;
-        result[label] = parameter.type === "boolean" ? raw === "true"
-            : ["integer", "number", "angle"].includes(parameter.type) ? Number(raw) : raw;
-    }
-    return result;
-}
-
-// Safari allows only 100 address changes per 10 seconds and throws past that, and a dragged slider
-// changes values far faster. So the address changes at most every 250 ms, ending with the latest
-// values, and a failure to change it is never allowed to stop anything else.
-const hashInterval = 250;
-let lastHashWrite = 0, hashTimer = null;
-
+// The model on screen is kept in the address, so a link can open the customizer on a given tab
 function writeHash() {
-    if (hashTimer) return;
-    const wait = Math.max(0, lastHashWrite + hashInterval - performance.now());
-    hashTimer = setTimeout(() => {
-        hashTimer = null;
-        lastHashWrite = performance.now();
-        const entries = Object.entries(changed.get(model.name) ?? {});
-        if (model !== models[0]) entries.unshift(["model", model.name]);
-        try {
-            history.replaceState(null, "", entries.length ? `#${new URLSearchParams(entries)}` : location.pathname);
-        } catch (error) {
-            console.warn("Couldn't update the address:", error);
-        }
-    }, wait);
+    try {
+        history.replaceState(null, "", model !== models[0] ? `#${new URLSearchParams({ model: model.name })}` : location.pathname);
+    } catch (error) {
+        console.warn("Couldn't update the address:", error);
+    }
 }
 
 function humanize(name) {
@@ -298,7 +274,9 @@ function humanize(name) {
 let isReady = false, loading = false, loadAttempt = 0;
 let building = null; // the model and values of the build in progress
 const builds = new Map(); // the last build of each model, with the values it was built with
-let lastFile = null, shownModel = null;
+// The model and values of the build on screen, while they match the controls, to download a file of
+let downloadable = null, shownModel = null;
+let exporting = false; // whether the file to download is being made
 let buildTimer;
 
 const builder = new ModelBuilder(import.meta.url, (data) => {
@@ -308,6 +286,10 @@ const builder = new ModelBuilder(import.meta.url, (data) => {
             ? `Loading model… ${megabytes(data.received)} of ${megabytes(data.total)} MB`
             : `Loading model… ${megabytes(data.received)} MB`;
         if (data.total) $("progress-bar").style.width = `${(100 * data.received) / data.total}%`;
+    } else if (data.type === "memory") {
+        const megabytes = (bytes) => Math.round(bytes / 1e6).toLocaleString();
+        $("memory").textContent = `Memory: ${megabytes(data.memoryBytes)} MB, of which cache about ${megabytes(data.cacheBytes)} MB`;
+        $("memory").hidden = false;
     } else if (data.type === "compiling") {
         $("overlay-text").textContent = "Preparing model…";
         $("progress-bar").style.width = "100%";
@@ -327,7 +309,7 @@ function busy(active, text = "Building…") {
     form.setAttribute("aria-busy", active);
     if (active) {
         cancelTimer = setTimeout(() => { $("cancel").hidden = false; }, 3000);
-        lastFile = null;
+        downloadable = null;
         $("download").disabled = true;
         setStatus("");
         $("build-time").textContent = text;
@@ -344,12 +326,12 @@ function failed(error) {
     builder.cancel();
     clearTimeout(buildTimer);
     busy(false);
-    lastFile = null;
+    downloadable = null;
     $("download").disabled = true;
     $("retry").textContent = isReady ? "Retry build" : "Retry loading";
     $("retry").hidden = false;
     $("build-time").textContent = error instanceof CancelledError ? "Cancelled" : "Failed";
-    $("log").textContent = (error.log ?? [error.message]).join("\n");
+    buildLog.show(error.log ?? [error.message]);
     setStatus(error.message, true);
     if (!shownModel) {
         $("overlay-text").textContent = error.message;
@@ -378,13 +360,13 @@ async function initialize() {
 function requestBuild() {
     clearTimeout(buildTimer);
     // A download must match the current controls, including while a rebuild is debounced or queued.
-    lastFile = null;
+    downloadable = null;
     $("download").disabled = true;
     buildTimer = setTimeout(startBuild, 120);
 }
 
 async function startBuild() {
-    if (!isReady || loading || building) return;
+    if (!isReady || loading || building || exporting) return;
     clearTimeout(buildTimer);
     const parameters = valuesFor(model);
     const attempt = { model, parameters, key: JSON.stringify(parameters) };
@@ -404,7 +386,7 @@ async function startBuild() {
 function finishBuild(result, finished) {
     building = null;
     busy(false);
-    const build = { ...result, key: finished.key };
+    const build = { ...result, key: finished.key, parameters: finished.parameters };
     builds.set(finished.model.name, build);
     // Keep the last preview while the latest parameters build. Never enable a download for stale
     // parameters, or report an obsolete build's error against the newly selected model.
@@ -443,21 +425,43 @@ $("retry").addEventListener("click", () => {
 // Starts after the viewer has been initialized, so even an immediately answered request can display.
 queueMicrotask(initialize);
 
-function display({ fileName, data, log, exitCode, milliseconds }) {
-    $("log").textContent = log.map((line) => line.replace(/^\d{4}-\d{2}-\d{2}T\S+ /, "")).join("\n");
+function display({ fileName, data, log, exitCode, milliseconds, parameters }) {
+    buildLog.show(log);
     if (data) {
         $("retry").hidden = true;
-        lastFile = { name: fileName, data };
+        downloadable = { model, parameters };
         $("download").disabled = false;
         setStatus(`Built in ${Math.round(milliseconds)} ms`);
-        show(data, shownModel !== model);
+        show(data, fileName, shownModel !== model);
         shownModel = model;
     } else {
-        lastFile = null;
+        downloadable = null;
         $("download").disabled = true;
         setStatus(exitCode === 0 ? "The model built to nothing." : "The model failed to build. See the build details.", true);
     }
 }
+
+// What the model wrote while building, a message per line. Most messages are informational, so only
+// warnings and errors are labeled, and timestamps are left out.
+const buildLog = {
+    show(lines) {
+        $("log").replaceChildren(...lines.map((line) => {
+            const text = line.replace(/^\d{4}-\d{2}-\d{2}T\S+ /, "");
+            const [, level, message] = text.match(/^(?:\S+ )?\[(DEBUG|INFO|WARNING|ERROR)\] (.*)$/s) ?? [null, null, text];
+            const element = document.createElement("div");
+            if (level === "WARNING") {
+                element.className = "warning";
+                element.textContent = `Warning: ${message}`;
+            } else if (level === "ERROR" || text.startsWith("Crashed:")) {
+                element.className = "error";
+                element.textContent = level ? `Error: ${message}` : message;
+            } else {
+                element.textContent = message;
+            }
+            return element;
+        }));
+    },
+};
 
 // Errors show in the sidebar. How long a successful build took goes in the build details.
 function setStatus(text, isError = false) {
@@ -466,12 +470,41 @@ function setStatus(text, isError = false) {
     if (!isError) $("build-time").textContent = text;
 }
 
-$("download").addEventListener("click", () => {
-    if (!lastFile) return;
-    const url = URL.createObjectURL(new Blob([lastFile.data], { type: "model/3mf" }));
-    const link = Object.assign(document.createElement("a"), { href: url, download: lastFile.name });
-    link.click();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
+// The media type of a downloaded model file, from its extension
+function mediaType(fileName) {
+    const types = { "3mf": "model/3mf", "stl": "model/stl", "svg": "image/svg+xml" };
+    return types[fileName.split(".").pop().toLowerCase()] ?? "application/octet-stream";
+}
+
+// Builds show a preview, so the file itself is made when it's downloaded. The model is still running
+// from building that preview, so its geometry is cached, and making the file is mostly encoding it.
+// Builds wait until it's done.
+$("download").addEventListener("click", async () => {
+    if (!downloadable || exporting || building) return;
+    const { model: target, parameters } = downloadable;
+    exporting = true;
+    $("download").disabled = true;
+    $("download").textContent = "Preparing…";
+    try {
+        const result = await builder.export(target.name, parameters);
+        if (!result.data) {
+            const error = new Error("The model file couldn't be made. See the build details.");
+            error.log = result.log;
+            throw error;
+        }
+        const url = URL.createObjectURL(new Blob([result.data], { type: mediaType(result.fileName) }));
+        const link = Object.assign(document.createElement("a"), { href: url, download: result.fileName });
+        link.click();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (error) {
+        buildLog.show(error.log ?? [error.message]);
+        setStatus(error.message, true);
+    } finally {
+        exporting = false;
+        $("download").textContent = "Download Model";
+        $("download").disabled = !downloadable;
+        if (isReady && builds.get(model.name)?.key !== buildKey(model)) startBuild();
+    }
 });
 
 // MARK: Viewer
@@ -500,20 +533,9 @@ function createViewer() {
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(getComputedStyle(document.documentElement).getPropertyValue("--viewer").trim());
     const camera = new THREE.PerspectiveCamera(30, 1, 0.1, 10000);
-    const controlsView = new OrbitControls(camera, renderer.domElement);
-    controlsView.enableDamping = true;
+    const controlsView = new ViewportControls(camera, renderer.domElement);
 
-    // A soft studio environment for metallic materials to reflect, which also fills in the lighting
-    const environment = new THREE.PMREMGenerator(renderer);
-    scene.environment = environment.fromScene(new RoomEnvironment(), 0.04).texture;
-    scene.environmentIntensity = 0.45;
-    environment.dispose();
-
-    scene.add(new THREE.HemisphereLight(0xffffff, 0x8a8577, 1.0));
-    const keyLight = new THREE.DirectionalLight(0xffffff, 1.1);
-    keyLight.position.set(1, -1.5, 2);
-    camera.add(keyLight);
-    scene.add(camera);
+    setupLighting(scene, camera, renderer);
 
     const root = document.documentElement;
     const gridColor = getComputedStyle(root).getPropertyValue("--grid").trim();
@@ -536,7 +558,8 @@ function createViewer() {
     let current = null, framed = false;
 
     function frame(box) {
-        frameIsometric(camera, box, controlsView.target);
+        controlsView.reset();
+        frameIsometric(camera, box, new THREE.Vector3());
     }
 
     function resize() {
@@ -548,8 +571,8 @@ function createViewer() {
     new ResizeObserver(resize).observe(container);
     resize();
 
-    renderer.setAnimationLoop(() => {
-        controlsView.update();
+    renderer.setAnimationLoop((time) => {
+        controlsView.update(time);
         camera.updateMatrixWorld();
         grid.updateScale(camera, container.clientWidth, container.clientHeight);
         axisIndicator.update(camera);
@@ -557,11 +580,11 @@ function createViewer() {
     });
 
     // Frames the model the first time, and again when a different model is shown
-    return (data, isNewModel) => {
+    return (data, fileName, isNewModel) => {
         const buffer = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
         // Parts without a color of their own get the page's model color
         const color = getComputedStyle(document.documentElement).getPropertyValue("--model").trim();
-        const object = read3MF(buffer, color);
+        const object = fileName.endsWith(".cadovapreview") ? readPreview(buffer, color) : read3MF(buffer, color);
         object.traverse((child) => {
             if (child.isMesh) child.geometry = toCreasedNormals(child.geometry, THREE.MathUtils.degToRad(30));
         });
@@ -575,6 +598,7 @@ function createViewer() {
         current = object;
         scene.add(object);
         const box = new THREE.Box3().setFromObject(object);
+        controlsView.setModel(object, box);
         grid.updateBounds(box);
         origin.visible = !box.isEmpty();
         axisIndicator.show();

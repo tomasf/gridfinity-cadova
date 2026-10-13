@@ -5,6 +5,7 @@
 // extension), components, color groups, base materials and physically based metallic properties.
 
 import * as THREE from "three";
+import { appearanceDefaults as defaults, createMaterial, createPartMeshes } from "./meshes.js";
 import { unzipSync, strFromU8 } from "three/addons/libs/fflate.module.js";
 
 const CORE = "http://schemas.microsoft.com/3dmanufacturing/core/2015/02";
@@ -12,9 +13,6 @@ const MATERIAL = "http://schemas.microsoft.com/3dmanufacturing/material/2015/02"
 const PRODUCTION = "http://schemas.microsoft.com/3dmanufacturing/production/2015/06";
 const CADOVA = "https://cadova.org/3mf";
 const MODEL_RELATIONSHIP = "http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel";
-
-// A display color for each triangle that doesn't have one, and how parts that aren't printed show
-const defaults = { roughness: 0.9, metalness: 0, contextOpacity: 0.3 };
 
 // Reads a 3MF file. Triangles without a color of their own get the default color. Returns a group
 // holding a mesh for each object and material.
@@ -86,31 +84,27 @@ export function read3MF(buffer, defaultColor) {
             positions[i * 3 + 1] = Number(vertexNodes[i].getAttribute("y"));
             positions[i * 3 + 2] = Number(vertexNodes[i].getAttribute("z"));
         }
-        const position = new THREE.BufferAttribute(positions, 3);
 
         const objectProperty = object.getAttribute("pid");
         const objectIndex = object.getAttribute("pindex") ?? "0";
-        const trianglesByMaterial = new Map();
-        for (const triangle of mesh.getElementsByTagNameNS(CORE, "triangle")) {
+        const triangles = mesh.getElementsByTagNameNS(CORE, "triangle");
+        const indices = new Uint32Array(triangles.length * 3);
+        const faceMaterials = [];
+        for (let face = 0; face < triangles.length; face++) {
+            const triangle = triangles[face];
             const property = triangle.getAttribute("pid") ?? objectProperty;
             const index = triangle.getAttribute("p1") ?? (triangle.getAttribute("pid") ? "0" : objectIndex);
             const key = property ? `${property}:${index}` : "";
-            if (!trianglesByMaterial.has(key)) trianglesByMaterial.set(key, []);
-            trianglesByMaterial.get(key).push(
-                Number(triangle.getAttribute("v1")), Number(triangle.getAttribute("v2")), Number(triangle.getAttribute("v3")),
-            );
+            indices[face * 3] = Number(triangle.getAttribute("v1"));
+            indices[face * 3 + 1] = Number(triangle.getAttribute("v2"));
+            indices[face * 3 + 2] = Number(triangle.getAttribute("v3"));
+            faceMaterials.push(material(path, resources, key));
         }
-
-        return [...trianglesByMaterial].map(([key, indices]) => {
-            const geometry = new THREE.BufferGeometry();
-            geometry.setAttribute("position", position);
-            geometry.setIndex(indices);
-            return new THREE.Mesh(geometry, material(path, resources, key, semantic));
-        });
+        return createPartMeshes(positions, indices, faceMaterials, semantic);
     }
 
-    function material(path, resources, key, semantic) {
-        const cacheKey = `${path}|${key}|${semantic}`;
+    function material(path, resources, key) {
+        const cacheKey = `${path}|${key}`;
         if (materials.has(cacheKey)) return materials.get(cacheKey);
 
         let appearance = { color: new THREE.Color(defaultColor), opacity: 1, ...defaults };
@@ -118,17 +112,7 @@ export function read3MF(buffer, defaultColor) {
             const [property, index] = key.split(":");
             appearance = { ...appearance, ...resources.properties.get(property)?.[Number(index)] };
         }
-        let { opacity } = appearance;
-        if (semantic === "context") opacity *= defaults.contextOpacity;
-
-        const result = new THREE.MeshStandardMaterial({
-            color: appearance.color,
-            roughness: appearance.roughness,
-            metalness: appearance.metalness,
-            opacity,
-            transparent: opacity < 1,
-            depthWrite: opacity >= 1,
-        });
+        const result = createMaterial(appearance);
         materials.set(cacheKey, result);
         return result;
     }
