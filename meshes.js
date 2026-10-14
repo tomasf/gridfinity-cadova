@@ -1,7 +1,7 @@
 // Turns a model's parts into three.js meshes, whether they come from a preview or a 3MF file
 
 import * as THREE from "three";
-import { createSharpEdges } from "./edges.js";
+import { createSharpEdges } from "./edges.js?v=a9b1a012abe2";
 
 // How a triangle without a material of its own looks
 export const appearanceDefaults = { roughness: 0.9, metalness: 0 };

@@ -1,14 +1,14 @@
 import * as THREE from "three";
-import { ViewportControls } from "./navigation.js";
+import { ViewportControls } from "./navigation.js?v=a9b1a012abe2";
 import { toCreasedNormals } from "three/addons/utils/BufferGeometryUtils.js";
-import { ModelBuilder, CancelledError } from "./builder.js";
-import { read3MF } from "./threemf.js";
-import { readPreview } from "./preview.js";
-import { ViewportGrid } from "./grid.js";
-import { OriginAxes, AxisIndicator } from "./axes.js";
-import { frameIsometric } from "./camera.js";
-import { ViewportRenderer } from "./rendering.js";
-import { setupLighting } from "./lighting.js";
+import { ModelBuilder, CancelledError } from "./builder.js?v=a9b1a012abe2";
+import { read3MF } from "./threemf.js?v=a9b1a012abe2";
+import { readPreview } from "./preview.js?v=a9b1a012abe2";
+import { ViewportGrid } from "./grid.js?v=a9b1a012abe2";
+import { OriginAxes, AxisIndicator } from "./axes.js?v=a9b1a012abe2";
+import { frameIsometric } from "./camera.js?v=a9b1a012abe2";
+import { ViewportRenderer } from "./rendering.js?v=a9b1a012abe2";
+import { setupLighting } from "./lighting.js?v=a9b1a012abe2";
 
 const $ = (id) => document.getElementById(id);
 
@@ -16,6 +16,11 @@ const $ = (id) => document.getElementById(id);
 // parameter is identified by an opaque key, which only has to agree with the model built along with
 // this page, and each model keeps its own values. Only changed values are kept, by model; everything
 // else has its default. Values aren't kept in the address, since a link would outlive the keys.
+//
+// Which parameters a model uses can depend on its values, such as a choice of shape that each has
+// parameters of its own, so every preview reports the ones it used, and the form follows. A model's
+// `parameters` are the ones it uses now, and `known` every one it has used, whose changed values are
+// kept while they're hidden.
 let catalog, models, model;
 const changed = new Map();
 
@@ -37,6 +42,7 @@ function setUp(listing) {
     const chosen = document.querySelector('meta[name="cadova-model"]')?.content;
     models = catalog.models.filter((m) => chosen ? m.name === chosen : m.parameters.length > 0);
     if (!models.length) throw new Error(chosen ? `The model "${chosen}" wasn't found.` : "No model has parameters to customize.");
+    for (const m of models) m.known = new Map(m.parameters.map((parameter) => [parameter.key, parameter]));
 
     const hash = new URLSearchParams(location.hash.slice(1));
     model = models.find((m) => m.name === hash.get("model")) ?? models[0];
@@ -53,7 +59,9 @@ function setUp(listing) {
     const description = single ? models[0].description : catalog.description;
     if (description) $("subtitle").textContent = description;
 
-    if (!single) {
+    if (!single && models.length > tabLimit) {
+        setUpMenu();
+    } else if (!single) {
         for (const m of models) {
             const tab = Object.assign(document.createElement("button"), { type: "button", textContent: tabTitle(m) });
             tab.setAttribute("role", "tab");
@@ -66,20 +74,90 @@ function setUp(listing) {
     showForm();
 }
 
+// With more models than fit as tabs, the page offers a menu instead, with a section for each group.
+// Tests lower the limit to try the menu with fewer models.
+const tabLimit = window.cadovaTabLimit ?? 5;
+
+function setUpMenu() {
+    const menu = $("model-menu");
+    let section = null, sectionKey = null;
+    for (const m of models) {
+        const groups = m.groups ?? [];
+        const key = groups.join("/");
+        if (!groups.length) {
+            section = null;
+        } else if (key !== sectionKey) {
+            section = Object.assign(document.createElement("optgroup"), { label: groups.map(humanize).join(" › ") });
+            menu.append(section);
+        }
+        sectionKey = groups.length ? key : null;
+        // The menu's sections show the groups, so its entries don't need to
+        (section ?? menu).append(Object.assign(document.createElement("option"), { value: m.name, textContent: modelTitle(m) }));
+    }
+    menu.value = model.name;
+    menu.addEventListener("change", () => select(models.find((m) => m.name === menu.value)));
+    menu.hidden = false;
+}
+
 // A project's metadata applies to every model that doesn't override it, so a model whose title is the
 // project's is named after itself instead
-function tabTitle(m) {
+function modelTitle(m) {
     return m.title && m.title !== catalog.title ? m.title : humanize(m.name.split("/").pop());
+}
+
+// Tabs don't show groups, so a tab whose title another model shares names its groups too
+function tabTitle(m) {
+    const title = modelTitle(m);
+    const clashes = models.some((other) => other !== m && modelTitle(other) === title);
+    return clashes && m.groups?.length ? [...m.groups.map(humanize), title].join(" › ") : title;
 }
 
 function showForm() {
     form.replaceChildren();
     controls.clear();
     for (const [m, tab] of tabs) tab.setAttribute("aria-selected", m === model);
+    $("model-menu").value = model.name;
     if (tabs.size && model.description && model.description !== catalog.description) {
         form.append(Object.assign(document.createElement("p"), { className: "model-description", textContent: model.description }));
     }
-    model.parameters.forEach((parameter, index) => form.append(field(parameter, index)));
+    fields.clear();
+    for (const parameter of model.parameters) form.append(addField(parameter));
+    form.append(resetButton);
+    updateReset();
+}
+
+// The form's fields, by parameter key, kept while they're in use
+const fields = new Map();
+let fieldCount = 0;
+
+function addField(parameter) {
+    const element = field(parameter, fieldCount++);
+    fields.set(parameter.key, element);
+    return element;
+}
+
+// Takes the parameters a build used. If they differ from the ones on the form, the form changes to
+// match, leaving the fields that stay where they are, so the control in use isn't disturbed.
+function updateParameters(m, parameters) {
+    for (const parameter of parameters) m.known.set(parameter.key, parameter);
+    if (parameters.length === m.parameters.length && parameters.every((parameter, index) => parameter.key === m.parameters[index].key)) return;
+    m.parameters = parameters;
+    if (m !== model) return;
+
+    const keys = new Set(parameters.map((parameter) => parameter.key));
+    for (const [key, element] of fields) {
+        if (keys.has(key)) continue;
+        element.remove();
+        fields.delete(key);
+        controls.delete(key);
+    }
+    const description = form.querySelector(".model-description");
+    let cursor = description ? description.nextSibling : form.firstChild;
+    for (const parameter of parameters) {
+        const element = fields.get(parameter.key) ?? addField(parameter);
+        if (element === cursor) cursor = cursor.nextSibling;
+        else form.insertBefore(element, cursor);
+    }
 }
 
 function select(next) {
@@ -97,7 +175,7 @@ function select(next) {
         }
     } else {
         downloadable = null;
-        $("download").disabled = true;
+        holdDownload();
         requestBuild();
     }
 }
@@ -112,6 +190,8 @@ function valueFor(parameter, m = model) {
             return typeof value === "boolean" ? value : parameter.default;
         case "choice":
             return parameter.options.includes(value) ? value : parameter.default;
+        case "color":
+            return typeof value === "string" && /^#[0-9a-f]{6}([0-9a-f]{2})?$/i.test(value) ? value : parameter.default;
         case "integer":
         case "number":
         case "angle": {
@@ -126,12 +206,29 @@ function valueFor(parameter, m = model) {
     }
 }
 
+// Only changed values are sent; the model uses its defaults for the rest. So a parameter that starts
+// being used, with its default value, doesn't call for another build.
 function valuesFor(m) {
-    return Object.fromEntries(m.parameters.map((parameter) => [parameter.key, valueFor(parameter, m)]));
+    return Object.fromEntries(Object.keys(changed.get(m.name) ?? {}).filter((key) => m.known.has(key)).sort()
+        .map((key) => [key, valueFor(m.known.get(key), m)]));
 }
 
 function buildKey(m) {
     return JSON.stringify(valuesFor(m));
+}
+
+// A color input's value in the hexadecimal the model reads: "#rrggbb", or "#rrggbbaa" if it isn't
+// opaque. Browsers with alpha in their color picker report CSS instead, such as
+// "color(srgb 1 0.4 0 / 0.5)". Returns null for anything else.
+function colorHex(value) {
+    if (/^#[0-9a-f]{6}$/i.test(value)) return value.toLowerCase();
+    const match = value.match(/^color\(srgb\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)(?:\s*\/\s*([\d.]+)(%?))?\s*\)$/);
+    if (!match) return null;
+    const [, red, green, blue, alpha, percent] = match;
+    const opacity = alpha === undefined ? 1 : Number(alpha) / (percent ? 100 : 1);
+    const components = [red, green, blue].map(Number).concat(opacity < 0.998 ? [opacity] : []);
+    return "#" + components.map((component) =>
+        Math.round(Math.min(Math.max(component, 0), 1) * 255).toString(16).padStart(2, "0")).join("");
 }
 
 function field(parameter, index) {
@@ -167,6 +264,21 @@ function field(parameter, index) {
             head.append(toggle);
             element.removeChild(control);
             setValue = (value) => { input.checked = value; };
+            break;
+        }
+        case "color": {
+            // A swatch by the label, which opens the browser's own color picker, with an alpha
+            // component in browsers that offer one. In the others, a color chosen with it is opaque.
+            const input = Object.assign(document.createElement("input"), { type: "color", id, className: "swatch" });
+            input.setAttribute("alpha", "");
+            const hasAlpha = "alpha" in input;
+            input.addEventListener("input", () => {
+                const value = colorHex(input.value);
+                if (value) update(parameter.key, value);
+            });
+            head.append(input);
+            element.removeChild(control);
+            setValue = (value) => { input.value = hasAlpha ? value : value.slice(0, 7); };
             break;
         }
         case "choice": {
@@ -226,9 +338,9 @@ function field(parameter, index) {
                 update(parameter.key, Number(number.value));
             });
             control.append(number);
-            if (parameter.type === "angle") {
-                control.append(Object.assign(document.createElement("span"), { className: "unit", textContent: "°" }));
-            }
+            // Angles are always in degrees. Numbers show the unit their parameter gives, if any.
+            const unit = parameter.type === "angle" ? "°" : parameter.unit;
+            if (unit) control.append(Object.assign(document.createElement("span"), { className: "unit", textContent: unit }));
             setValue = (value) => { number.value = value; if (range) range.value = value; };
             break;
         }
@@ -246,19 +358,30 @@ function field(parameter, index) {
 
 function update(key, value) {
     changedValues(model)[key] = value;
+    updateReset();
     requestBuild();
 }
 
-$("reset").addEventListener("click", () => {
+// Resetting is only offered once the model has values to reset, hidden ones included
+const resetButton = $("reset");
+
+function updateReset() {
+    resetButton.hidden = !isReady || Object.keys(changed.get(model?.name) ?? {}).length === 0;
+}
+
+resetButton.addEventListener("click", () => {
     changed.delete(model.name);
     for (const parameter of model.parameters) controls.get(parameter.key)(parameter.default);
+    updateReset();
     requestBuild();
 });
 
 // The model on screen is kept in the address, so a link can open the customizer on a given tab
 function writeHash() {
     try {
-        history.replaceState(null, "", model !== models[0] ? `#${new URLSearchParams({ model: model.name })}` : location.pathname);
+        // A model in a group is named with its path, whose slashes read better left as they are
+        const hash = `#${new URLSearchParams({ model: model.name })}`.replaceAll("%2F", "/");
+        history.replaceState(null, "", model !== models[0] ? hash : location.pathname);
     } catch (error) {
         console.warn("Couldn't update the address:", error);
     }
@@ -288,8 +411,7 @@ const builder = new ModelBuilder(import.meta.url, (data) => {
         if (data.total) $("progress-bar").style.width = `${(100 * data.received) / data.total}%`;
     } else if (data.type === "memory") {
         const megabytes = (bytes) => Math.round(bytes / 1e6).toLocaleString();
-        $("memory").textContent = `Memory: ${megabytes(data.memoryBytes)} MB, of which cache about ${megabytes(data.cacheBytes)} MB`;
-        $("memory").hidden = false;
+        console.info(`Memory: ${megabytes(data.memoryBytes)} MB, of which cache about ${megabytes(data.cacheBytes)} MB`);
     } else if (data.type === "compiling") {
         $("overlay-text").textContent = "Preparing model…";
         $("progress-bar").style.width = "100%";
@@ -298,20 +420,55 @@ const builder = new ModelBuilder(import.meta.url, (data) => {
 
 let cancelTimer;
 
+// A rebuild shows that it's building only once it has taken long enough to notice, so that quick
+// rebuilds, such as while dragging a slider, don't make the indicator flicker. Loading, and the
+// first build, which have nothing on screen yet, show it straight away.
+const progressDelay = 400;
+let progressTimer;
+
+// Download is disabled as soon as its file would no longer match the controls, but while a rebuild
+// or the download itself hasn't yet taken long enough to notice, it keeps its usual look, like the
+// building indicator. A failure disables it visibly at once.
+let downloadTimer;
+
+function holdDownload() {
+    const button = $("download");
+    if (!button.disabled) {
+        button.classList.add("held");
+        clearTimeout(downloadTimer);
+        downloadTimer = setTimeout(() => button.classList.remove("held"), progressDelay);
+    }
+    button.disabled = true;
+}
+
+function disableDownload() {
+    clearTimeout(downloadTimer);
+    $("download").classList.remove("held");
+    $("download").disabled = true;
+}
+
 function busy(active, text = "Building…") {
     clearTimeout(cancelTimer);
-    $("build-progress").hidden = !active;
-    $("building").hidden = !active;
+    clearTimeout(progressTimer);
+    const showProgress = () => {
+        $("build-progress").hidden = false;
+        $("building").hidden = false;
+    };
+    $("build-progress").hidden = true;
+    $("building").hidden = true;
+    if (active) {
+        if (shownModel) progressTimer = setTimeout(showProgress, progressDelay);
+        else showProgress();
+    }
     $("building").textContent = text;
     $("cancel").hidden = true;
-    $("retry").hidden = true;
-    $("reset").disabled = !isReady;
+    updateReset();
     form.setAttribute("aria-busy", active);
     if (active) {
         cancelTimer = setTimeout(() => { $("cancel").hidden = false; }, 3000);
         downloadable = null;
-        $("download").disabled = true;
-        setStatus("");
+        holdDownload();
+        hideError();
         $("build-time").textContent = text;
         if (!shownModel) {
             $("overlay").hidden = false;
@@ -327,16 +484,12 @@ function failed(error) {
     clearTimeout(buildTimer);
     busy(false);
     downloadable = null;
-    $("download").disabled = true;
-    $("retry").textContent = isReady ? "Retry build" : "Retry loading";
-    $("retry").hidden = false;
+    disableDownload();
     $("build-time").textContent = error instanceof CancelledError ? "Cancelled" : "Failed";
-    buildLog.show(error.log ?? [error.message]);
-    setStatus(error.message, true);
-    if (!shownModel) {
-        $("overlay-text").textContent = error.message;
-        $("progress-bar").parentElement.hidden = true;
-    }
+    buildLog.report(error.log ?? []);
+    showError(error.message, error.log ?? []);
+    // The card takes the loading screen's place, until a retry brings it back
+    if (!shownModel) $("overlay").hidden = true;
 }
 
 async function initialize() {
@@ -361,7 +514,7 @@ function requestBuild() {
     clearTimeout(buildTimer);
     // A download must match the current controls, including while a rebuild is debounced or queued.
     downloadable = null;
-    $("download").disabled = true;
+    holdDownload();
     buildTimer = setTimeout(startBuild, 120);
 }
 
@@ -395,11 +548,12 @@ function finishBuild(result, finished) {
             const error = new Error(result.stackOverflow
                 ? "The model exceeds this browser's worker stack limit. Try simpler settings or reduce its resolution."
                 : result.exitCode === 0 ? "The model built to nothing. Try different settings."
-                : "The model failed to build. See the build details.");
+                : "The model couldn't be built with these settings.");
             error.log = result.log;
             failed(error);
             return;
         }
+        if (result.parameterList) updateParameters(finished.model, result.parameterList);
         try {
             display(build);
         } catch (error) {
@@ -422,52 +576,63 @@ $("retry").addEventListener("click", () => {
     else initialize();
 });
 
+// Dismissing leaves the last preview, still without a download, until a setting changes
+$("dismiss").addEventListener("click", hideError);
+
 // Starts after the viewer has been initialized, so even an immediately answered request can display.
 queueMicrotask(initialize);
 
 function display({ fileName, data, log, exitCode, milliseconds, parameters }) {
-    buildLog.show(log);
+    buildLog.report(log);
     if (data) {
-        $("retry").hidden = true;
+        hideError();
+        console.info(`Built in ${Math.round(milliseconds)} ms`);
         downloadable = { model, parameters };
         $("download").disabled = false;
-        setStatus(`Built in ${Math.round(milliseconds)} ms`);
+        $("build-time").textContent = `Built in ${Math.round(milliseconds)} ms`;
         show(data, fileName, shownModel !== model);
         shownModel = model;
     } else {
         downloadable = null;
-        $("download").disabled = true;
-        setStatus(exitCode === 0 ? "The model built to nothing." : "The model failed to build. See the build details.", true);
+        disableDownload();
+        showError(exitCode === 0 ? "The model built to nothing." : "The model couldn't be built with these settings.", log);
     }
 }
 
-// What the model wrote while building, a message per line. Most messages are informational, so only
-// warnings and errors are labeled, and timestamps are left out.
+// What the model wrote while building, a message per line, its own prints included. Everything goes to
+// the browser's console after each build, for the model's author, and a failure shows it to the
+// visitor too. Timestamps are left out, and only warnings and errors are labeled.
 const buildLog = {
+    parse(line) {
+        const text = line.replace(/^\d{4}-\d{2}-\d{2}T\S+ /, "");
+        const [, level, message] = text.match(/^(?:\S+ )?\[(DEBUG|INFO|WARNING|ERROR)\] (.*)$/s) ?? [null, null, text];
+        if (level === "WARNING") return { level: "warning", text: `Warning: ${message}` };
+        if (level === "ERROR") return { level: "error", text: `Error: ${message}` };
+        if (text.startsWith("Crashed:")) return { level: "error", text };
+        return { level: "log", text: message };
+    },
+
+    report(lines) {
+        for (const { level, text } of lines.map((line) => this.parse(line))) console[level](text);
+    },
+
     show(lines) {
-        $("log").replaceChildren(...lines.map((line) => {
-            const text = line.replace(/^\d{4}-\d{2}-\d{2}T\S+ /, "");
-            const [, level, message] = text.match(/^(?:\S+ )?\[(DEBUG|INFO|WARNING|ERROR)\] (.*)$/s) ?? [null, null, text];
-            const element = document.createElement("div");
-            if (level === "WARNING") {
-                element.className = "warning";
-                element.textContent = `Warning: ${message}`;
-            } else if (level === "ERROR" || text.startsWith("Crashed:")) {
-                element.className = "error";
-                element.textContent = level ? `Error: ${message}` : message;
-            } else {
-                element.textContent = message;
-            }
-            return element;
-        }));
+        $("log").replaceChildren(...lines.map((line) =>
+            Object.assign(document.createElement("div"), { textContent: this.parse(line).text })));
     },
 };
 
-// Errors show in the sidebar. How long a successful build took goes in the build details.
-function setStatus(text, isError = false) {
-    $("status").textContent = isError ? text : "";
-    $("status").hidden = !isError;
-    if (!isError) $("build-time").textContent = text;
+// A failure shows over the model view, with what the model had to say about it
+function showError(message, lines = []) {
+    $("status").textContent = message;
+    buildLog.show(lines);
+    $("alert").hidden = false;
+}
+
+function hideError() {
+    $("alert").hidden = true;
+    $("status").textContent = "";
+    $("log").replaceChildren();
 }
 
 // The media type of a downloaded model file, from its extension
@@ -483,12 +648,12 @@ $("download").addEventListener("click", async () => {
     if (!downloadable || exporting || building) return;
     const { model: target, parameters } = downloadable;
     exporting = true;
-    $("download").disabled = true;
+    holdDownload();
     $("download").textContent = "Preparing…";
     try {
         const result = await builder.export(target.name, parameters);
         if (!result.data) {
-            const error = new Error("The model file couldn't be made. See the build details.");
+            const error = new Error("The model file couldn't be made.");
             error.log = result.log;
             throw error;
         }
@@ -497,8 +662,8 @@ $("download").addEventListener("click", async () => {
         link.click();
         setTimeout(() => URL.revokeObjectURL(url), 1000);
     } catch (error) {
-        buildLog.show(error.log ?? [error.message]);
-        setStatus(error.message, true);
+        buildLog.report(error.log ?? []);
+        showError(error.message, error.log ?? []);
     } finally {
         exporting = false;
         $("download").textContent = "Download Model";
@@ -540,6 +705,14 @@ try {
         $("overlay-text").textContent = "This browser can't show a 3D preview, but the model can still be downloaded.";
         $("progress-bar").parentElement.hidden = true;
     };
+}
+
+// The model's size, such as "112 × 84 × 40 mm", in the model's units, which are millimeters by
+// convention. A 2D model, built as a very thin solid, only has its width and depth.
+function sizeText(box) {
+    const size = box.getSize(new THREE.Vector3());
+    const dimensions = size.z < 0.01 ? [size.x, size.y] : [size.x, size.y, size.z];
+    return `${dimensions.map((value) => String(Math.round(value * 10) / 10)).join(" × ")} mm`;
 }
 
 function createViewer() {
@@ -628,6 +801,8 @@ function createViewer() {
         current = object;
         scene.add(object);
         const box = new THREE.Box3().setFromObject(object);
+        $("model-size").textContent = sizeText(box);
+        $("model-size").hidden = box.isEmpty();
         controlsView.setModel(object, box);
         currentBox = box;
         $("view-controls").hidden = false;

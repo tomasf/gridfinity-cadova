@@ -5,7 +5,7 @@
 // extension), components, color groups, base materials and physically based metallic properties.
 
 import * as THREE from "three";
-import { appearanceDefaults as defaults, createMaterial, createPartMeshes } from "./meshes.js";
+import { appearanceDefaults as defaults, createMaterial, createPartMeshes } from "./meshes.js?v=a9b1a012abe2";
 import { unzipSync, strFromU8 } from "three/addons/libs/fflate.module.js";
 
 const CORE = "http://schemas.microsoft.com/3dmanufacturing/core/2015/02";

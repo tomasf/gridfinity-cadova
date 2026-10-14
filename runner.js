@@ -30,11 +30,13 @@ export async function fetchModel(url, onProgress = () => {}) {
 // Fetches the model's resources: the files SwiftPM copies for `.copy` and `.process` resources,
 // listed in resources.json. WASI file reads are synchronous, so they're all fetched up front.
 export async function fetchResources(baseURL) {
-    const response = await fetch(new URL("resources.json", baseURL));
+    // With the customizer's version, as the model's own address has it
+    const address = (path) => Object.assign(new URL(path, baseURL), { search: new URL(baseURL).search });
+    const response = await fetch(address("resources.json"));
     if (!response.ok) throw new Error(`Couldn't load the list of resources (${response.status})`);
     const paths = await response.json();
     return Promise.all(paths.map(async (path) => {
-        const url = new URL(`resources/${path.split("/").map(encodeURIComponent).join("/")}`, baseURL);
+        const url = address(`resources/${path.split("/").map(encodeURIComponent).join("/")}`);
         const file = await fetch(url);
         if (!file.ok) throw new Error(`Couldn't load the resource ${path} (${file.status})`);
         return [path, new Uint8Array(await file.arrayBuffer())];
@@ -122,6 +124,30 @@ export class ModelSession {
         }
     }
 
+    // What the model wrote, as messages in the order it wrote them. Each line it prints is a message.
+    // Cadova writes its own messages to the error stream, each starting with a timestamp, and a
+    // message can run over several lines, which stay together.
+    static messages(output) {
+        const runs = [];
+        for (const { stream, bytes } of output) {
+            if (runs.at(-1)?.stream === stream) runs.at(-1).chunks.push(bytes);
+            else runs.push({ stream, chunks: [bytes] });
+        }
+        const messages = [];
+        for (const { stream, chunks } of runs) {
+            const text = new TextDecoder().decode(new Uint8Array(chunks.flatMap((bytes) => [...bytes])));
+            const lines = text.split("\n").filter((line, index, all) => line !== "" || index < all.length - 1);
+            let continuing = false;
+            for (const line of lines) {
+                const starts = stream === "out" || !continuing || /^\d{4}-\d{2}-\d{2}T/.test(line);
+                if (starts) messages.push(line);
+                else messages[messages.length - 1] += `\n${line}`;
+                continuing = stream === "error";
+            }
+        }
+        return messages;
+    }
+
     // Parameter values as strings, which each parameter parses as its own type
     static stringValues(values) {
         return Object.fromEntries(Object.entries(values).map(([label, value]) => [label, String(value)]));
@@ -160,15 +186,23 @@ export class ModelSession {
                 exitCode = -1;
             }
         }
-        const text = new TextDecoder().decode(new Uint8Array(this.output.flatMap((bytes) => [...bytes])));
-        const log = text.split("\n").filter((line, index, lines) => line !== "" || index < lines.length - 1);
+        const log = ModelSession.messages(this.output);
         if (crash) log.push(crash);
         const milliseconds = performance.now() - start;
 
-        const [fileName, file] = [...this.files]
-            .find(([name]) => outputSuffix ? name.endsWith(outputSuffix) : name !== "request.json") ?? [];
+        const parameterSuffix = ".parameters.json";
+        const [fileName, file] = [...this.files].find(([name, entry]) => entry instanceof File
+            && !name.endsWith(parameterSuffix) && (outputSuffix ? name.endsWith(outputSuffix) : name !== "request.json")) ?? [];
         const data = exitCode === 0 && file ? file.data : null;
-        return { fileName, data, log, exitCode, stackOverflow, milliseconds };
+        // A preview comes with the parameters the model used for it
+        const [, parameterFile] = [...this.files].find(([name, entry]) => entry instanceof File && name.endsWith(parameterSuffix)) ?? [];
+        let parameterList = null;
+        try {
+            if (data && parameterFile) parameterList = JSON.parse(new TextDecoder().decode(parameterFile.data));
+        } catch {
+            parameterList = null; // the page keeps the parameters it has
+        }
+        return { fileName, data, log, exitCode, stackOverflow, milliseconds, parameterList };
     }
 
     // A new instance, with a new /io directory, that hasn't started yet. CADOVA_CUSTOMIZER_SESSION
@@ -176,14 +210,15 @@ export class ModelSession {
     // exits, and then every request starts a new instance.
     async instantiate() {
         this.files = new Map();
-        const write = (bytes) => this.output.push(bytes.slice());
+        const write = (stream) => (bytes) => this.output.push({ stream, bytes: bytes.slice() });
         const environment = [
-            "CADOVA_LOG_LEVEL=info", "CADOVA_CUSTOMIZER_REQUEST=/io/request.json", "CADOVA_CUSTOMIZER_SESSION=1",
+            // Only what a visitor might need: warnings and errors, and whatever the model prints itself
+            "CADOVA_LOG_LEVEL=warning", "CADOVA_CUSTOMIZER_REQUEST=/io/request.json", "CADOVA_CUSTOMIZER_SESSION=1",
         ];
         const wasi = new WASI(["model"], environment, [
             new OpenFile(new File([])),
-            new ConsoleStdout(write),
-            new ConsoleStdout(write),
+            new ConsoleStdout(write("out")),
+            new ConsoleStdout(write("error")),
             new PreopenDirectory("/io", this.files),
             new PreopenDirectory("/", resourceDirectory(this.resources)),
         ], { debug: false });

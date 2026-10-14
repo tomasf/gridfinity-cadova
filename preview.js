@@ -3,7 +3,7 @@
 // than XML in a zip archive. ThreeMFDataProvider+CustomizerPreview.swift describes the format.
 
 import * as THREE from "three";
-import { appearanceDefaults, createMaterial, createPartMeshes } from "./meshes.js";
+import { appearanceDefaults, createMaterial, createPartMeshes } from "./meshes.js?v=a9b1a012abe2";
 
 // Reads a preview. Triangles without a material of their own get the part's default material, or
 // else the default color. Returns a group holding a mesh for each part and material.

@@ -1,6 +1,6 @@
 // Runs builds off the main thread, so the page stays responsive while the model builds
 
-import { fetchModel, fetchResources, ModelSession } from "./runner.js";
+import { fetchModel, fetchResources, ModelSession } from "./runner.js?v=a9b1a012abe2";
 
 let session;
 
